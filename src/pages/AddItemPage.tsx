@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useAuthStore }      from '../stores/authStore'
 import { useInventoryStore, type ItemUnit } from '../stores/inventoryStore'
 import { useLocationStore }  from '../stores/locationStore'
-import { startScanner, lookupBarcode } from '../lib/barcode'
+import { startScanner, releaseStream, lookupBarcode } from '../lib/barcode'
 import { calcRemindDate }    from '../lib/calendar'
 
 const UNITS: ItemUnit[] = ['pz','g','kg','ml','l','cl','mg']
@@ -39,6 +39,7 @@ export function AddItemPage() {
   const [locationId, setLocationId]   = useState('')
   const [purchaseDate, setPurchaseDate] = useState('')
   const [expiryDate, setExpiryDate]   = useState('')
+  const [imageUrl, setImageUrl]       = useState('')
   const [error, setError]             = useState('')
   const [saved, setSaved]             = useState(false)
   const [dirty, setDirty]             = useState(false)   // modifiche non salvate
@@ -71,13 +72,14 @@ export function AddItemPage() {
         setPurchasePrice(item.purchasePrice ? String(item.purchasePrice) : '')
         setCategoryId(item.categoryId ?? ''); setLocationId(item.locationId ?? '')
         setPurchaseDate(item.purchaseDate ?? ''); setExpiryDate(item.expiryDate ?? '')
+        setImageUrl(item.imageUrl ?? '')
       }
     } else {
       // Nuovo articolo: pre-seleziona deposito attivo
       setName(''); setBarcode(''); setBrand(''); setNotes('')
       setQuantity('1'); setUnit('pz'); setPurchasePrice('')
       setCategoryId(''); setLocationId(activeLocationId ?? '')
-      setPurchaseDate(''); setExpiryDate('')
+      setPurchaseDate(''); setExpiryDate(''); setImageUrl('')
     }
   }, [id, isEdit])
 
@@ -105,7 +107,7 @@ export function AddItemPage() {
   }
 
   // ── Scanner ───────────────────────────────────────────────────────────────
-  useEffect(() => () => { stopScanRef.current?.() }, [])
+  useEffect(() => () => { stopScanRef.current?.(); releaseStream() }, [])
 
   const handleStartScan = async () => {
     setScanning(true)
@@ -118,11 +120,20 @@ export function AddItemPage() {
         const info = await lookupBarcode(code)
         setBarcodeLoading(false)
         if (info.found) {
-          if (!name && info.name) { setName(info.name); markDirty() }
+          if (!name && info.name)   { setName(info.name);   markDirty() }
           if (!brand && info.brand) { setBrand(info.brand); markDirty() }
-          setBarcodeInfo(`✓ Trovato: ${info.name || 'Prodotto'}`)
+          // Auto-compila peso/volume se rilevato
+          if (info.weightValue && info.weightUnit) {
+            setQuantity(String(info.weightValue))
+            setUnit(info.weightUnit as ItemUnit)
+            markDirty()
+          }
+          if (info.imageUrl) { setImageUrl(info.imageUrl); markDirty() }
+          const wLabel = info.weightValue && info.weightUnit
+            ? ` · ${info.weightValue} ${info.weightUnit}` : ''
+          setBarcodeInfo(`✓ Trovato: ${info.name || 'Prodotto'}${wLabel}`)
         } else {
-          setBarcodeInfo('Prodotto non trovato. Compila manualmente.')
+          setBarcodeInfo('Prodotto non trovato nel database. Compila manualmente.')
         }
       }, () => { setBarcodeInfo('Errore fotocamera.'); setScanning(false) })
       stopScanRef.current = stop
@@ -140,11 +151,12 @@ export function AddItemPage() {
       quantity: qty, unit, purchasePrice: purchasePrice ? parseFloat(purchasePrice) : undefined,
       categoryId: categoryId || null, locationId: locationId || null,
       purchaseDate: purchaseDate || null, expiryDate: expiryDate || null,
+      imageUrl: imageUrl || null,
     }
     if (isEdit && id) await updateItem(id, user.id, payload)
     else await addItem(user.id, payload)
     setDirty(false)
-  }, [user, name, barcode, brand, notes, quantity, unit, purchasePrice, categoryId, locationId, purchaseDate, expiryDate, isEdit, id])
+  }, [user, name, barcode, brand, notes, quantity, unit, purchasePrice, categoryId, locationId, purchaseDate, expiryDate, imageUrl, isEdit, id])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault(); setError('')
@@ -236,6 +248,27 @@ export function AddItemPage() {
             {barcodeInfo}
           </div>
         )}
+        {imageUrl && (
+          <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:8 }}>
+            <img
+              src={imageUrl}
+              alt="Immagine prodotto"
+              onError={e => { (e.target as HTMLImageElement).style.display='none' }}
+              style={{ width:64, height:64, objectFit:'contain', borderRadius:8,
+                background:'var(--bg-raised)', border:'1px solid var(--border)', padding:4 }}
+            />
+            <div style={{ flex:1 }}>
+              <div style={{ fontSize:'0.75rem', color:'var(--text-muted)', marginBottom:4 }}>
+                📸 Immagine dal database
+              </div>
+              <button type="button" className="btn btn-ghost btn-sm"
+                style={{ fontSize:'0.72rem', padding:'2px 8px' }}
+                onClick={() => { setImageUrl(''); markDirty() }}>
+                Rimuovi
+              </button>
+            </div>
+          </div>
+        )}
         <div className="field">
           <label>Codice manuale</label>
           <div className="input-group">
@@ -248,10 +281,18 @@ export function AddItemPage() {
                   setBarcodeLoading(true); setBarcodeInfo('Ricerca...')
                   const info = await lookupBarcode(barcode); setBarcodeLoading(false)
                   if (info.found) {
-                    if (!name && info.name) { setName(info.name); markDirty() }
+                    if (!name && info.name)   { setName(info.name);   markDirty() }
                     if (!brand && info.brand) { setBrand(info.brand); markDirty() }
-                    setBarcodeInfo(`✓ ${info.name || 'Trovato'}`)
-                  } else setBarcodeInfo('Non trovato.')
+                    if (info.weightValue && info.weightUnit) {
+                      setQuantity(String(info.weightValue))
+                      setUnit(info.weightUnit as ItemUnit)
+                      markDirty()
+                    }
+                    if (info.imageUrl) { setImageUrl(info.imageUrl); markDirty() }
+                    const wLabel = info.weightValue && info.weightUnit
+                      ? ` · ${info.weightValue} ${info.weightUnit}` : ''
+                    setBarcodeInfo(`✓ ${info.name || 'Trovato'}${wLabel}`)
+                  } else setBarcodeInfo('Non trovato in nessun database.')
                 }}>Cerca</button>
             )}
           </div>

@@ -189,11 +189,19 @@ function ItemCard({ item, today, category, confirmingDelete, onDelete, onCancelD
     <div className="card fade-in" style={{
       borderColor: isExpired?'rgba(239,68,68,.4)':isUrgent?'var(--accent-border)':'var(--border)' }}>
       <div style={{ display:'flex', gap:11, alignItems:'flex-start' }}>
-        <div style={{ width:40,height:40,borderRadius:10,flexShrink:0,
+        <div style={{ width:48,height:48,borderRadius:10,flexShrink:0,
           background:category?`${category.color}20`:'var(--bg-raised)',
           border:`1px solid ${category?category.color+'30':'var(--border)'}`,
-          display:'flex',alignItems:'center',justifyContent:'center',fontSize:'1.2rem' }}>
-          {category?.icon??'📦'}
+          display:'flex',alignItems:'center',justifyContent:'center',fontSize:'1.2rem',
+          overflow:'hidden' }}>
+          {item.imageUrl
+            ? <img src={item.imageUrl} alt="" loading="lazy"
+                onError={e => { const t=e.target as HTMLImageElement; t.style.display='none'; if(t.nextSibling) (t.nextSibling as HTMLElement).style.display='flex' }}
+                style={{ width:'100%',height:'100%',objectFit:'contain',padding:2 }}/>
+            : null}
+          <span style={{ display: item.imageUrl ? 'none' : 'flex', alignItems:'center', justifyContent:'center', width:'100%', height:'100%' }}>
+            {category?.icon??'📦'}
+          </span>
         </div>
         <div style={{ flex:1, minWidth:0 }}>
           <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap', marginBottom:3 }}>
