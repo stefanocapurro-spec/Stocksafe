@@ -1,0 +1,32 @@
+name: Supabase Keep-Alive
+
+on:
+  schedule:
+    # Ogni giorno alle 08:00 UTC (09:00 ora italiana, 10:00 in estate)
+    - cron: '0 8 * * *'
+  # Permette di eseguirlo manualmente dalla scheda Actions se necessario
+  workflow_dispatch:
+
+jobs:
+  ping:
+    name: Ping Supabase
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query Supabase REST API
+        run: |
+          STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+            --max-time 15 \
+            --request GET \
+            "${{ secrets.VITE_SUPABASE_URL }}/rest/v1/categories?limit=1" \
+            --header "apikey: ${{ secrets.VITE_SUPABASE_ANON_KEY }}" \
+            --header "Authorization: Bearer ${{ secrets.VITE_SUPABASE_ANON_KEY }}")
+
+          echo "HTTP status: $STATUS"
+
+          # 200 = ok, 406 = ok (RLS attivo, nessun utente loggato — è corretto)
+          if [ "$STATUS" = "200" ] || [ "$STATUS" = "406" ]; then
+            echo "✅ Supabase attivo e raggiungibile."
+          else
+            echo "⚠️ Risposta inattesa: $STATUS"
+            exit 1
+          fi
