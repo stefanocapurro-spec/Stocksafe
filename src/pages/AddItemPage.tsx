@@ -4,14 +4,19 @@ import { useAuthStore }      from '../stores/authStore'
 import { useInventoryStore, type ItemUnit } from '../stores/inventoryStore'
 import { useLocationStore }  from '../stores/locationStore'
 import { startScanner, stopScanner, lookupBarcode } from '../lib/barcode'
+import { contributeBarcode, type CommunityContribution } from '../lib/communityDb'
 import { calcRemindDate }    from '../lib/calendar'
 
 const UNITS: ItemUnit[] = ['pz','g','kg','ml','l','cl','mg']
 const UNIT_LABELS: Record<ItemUnit,string> = {
-  pz:'pezzi', g:'grammi', kg:'chilogrammi', ml:'millilitri', l:'litri', cl:'centilitri', mg:'milligrammi'
+  pz:'pezzi', g:'grammi', kg:'chilogrammi', ml:'millilitri',
+  l:'litri', cl:'centilitri', mg:'milligrammi',
 }
 
-function buildNavList(items: ReturnType<typeof useInventoryStore.getState>['items'], locationId: string | null) {
+function buildNavList(
+  items: ReturnType<typeof useInventoryStore.getState>['items'],
+  locationId: string | null
+) {
   return [...items]
     .filter(i => locationId ? i.locationId === locationId : true)
     .sort((a,b) => a.name.localeCompare(b.name,'it',{sensitivity:'base'}))
@@ -19,64 +24,74 @@ function buildNavList(items: ReturnType<typeof useInventoryStore.getState>['item
 }
 
 export function AddItemPage() {
-  const { id }      = useParams<{ id?: string }>()
-  const isEdit      = !!id
-  const navigate    = useNavigate()
-  const { user }    = useAuthStore()
+  const { id }   = useParams<{ id?: string }>()
+  const isEdit   = !!id
+  const navigate = useNavigate()
+  const { user } = useAuthStore()
   const { items, categories, addItem, updateItem, loading } = useInventoryStore()
   const { locations, activeLocationId } = useLocationStore()
 
   // ── Form state ───────────────────────────────────────────────────────────
-  const [name, setName]               = useState('')
-  const [barcode, setBarcode]         = useState('')
-  const [brand, setBrand]             = useState('')
-  const [notes, setNotes]             = useState('')
-  const [quantity, setQuantity]       = useState('1')
-  const [unit, setUnit]               = useState<ItemUnit>('pz')
+  const [name, setName]             = useState('')
+  const [barcode, setBarcode]       = useState('')
+  const [brand, setBrand]           = useState('')
+  const [notes, setNotes]           = useState('')
+  const [quantity, setQuantity]     = useState('1')
+  const [unit, setUnit]             = useState<ItemUnit>('pz')
   const [purchasePrice, setPurchasePrice] = useState('')
-  const [categoryId, setCategoryId]   = useState('')
-  const [locationId, setLocationId]   = useState('')
-  const [purchaseDate, setPurchaseDate] = useState('')
-  const [expiryDate, setExpiryDate]   = useState('')
-  const [imageUrl, setImageUrl]       = useState('')
-  const [error, setError]             = useState('')
-  const [saved, setSaved]             = useState(false)
-  const [dirty, setDirty]             = useState(false)
+  const [categoryId, setCategoryId] = useState('')
+  const [locationId, setLocationId] = useState('')
+  const [purchaseDate, setPurchaseDate]  = useState('')
+  const [expiryDate, setExpiryDate]     = useState('')
+  const [imageUrl, setImageUrl]     = useState('')
+  const [weightValue, setWeightValue] = useState<number|null>(null)
+  const [weightUnit, setWeightUnit]   = useState<string|null>(null)
+  const [error, setError]   = useState('')
+  const [saved, setSaved]   = useState(false)
+  const [dirty, setDirty]   = useState(false)
 
   // ── Scanner state ────────────────────────────────────────────────────────
-  const [scanning, setScanning]       = useState(false)
+  const [scanning, setScanning]           = useState(false)
   const [barcodeLoading, setBarcodeLoading] = useState(false)
-  const [barcodeInfo, setBarcodeInfo] = useState('')
+  const [barcodeInfo, setBarcodeInfo]     = useState('')
+  const [barcodeSource, setBarcodeSource] = useState<string|null>(null)
   const videoRef    = useRef<HTMLVideoElement>(null)
   const stopScanRef = useRef<(()=>void)|null>(null)
+
+  // ── Community contribute state ────────────────────────────────────────────
+  const [showContribute, setShowContribute]     = useState(false)
+  const [contributeStatus, setContributeStatus] = useState('')
+  const [contributing, setContributing]         = useState(false)
 
   // ── Navigazione prev/next ────────────────────────────────────────────────
   const navList = buildNavList(items, activeLocationId)
   const navIdx  = id ? navList.indexOf(id) : -1
   const prevId  = navIdx > 0 ? navList[navIdx-1] : null
   const nextId  = navIdx >= 0 && navIdx < navList.length-1 ? navList[navIdx+1] : null
-
-  const [pendingNav, setPendingNav]   = useState<string | null>(null)
+  const [pendingNav, setPendingNav]         = useState<string|null>(null)
   const [showSaveDialog, setShowSaveDialog] = useState(false)
 
   // ── Carica articolo esistente ────────────────────────────────────────────
   useEffect(() => {
-    setDirty(false); setSaved(false); setError('')
+    setDirty(false); setSaved(false); setError(''); setShowContribute(false)
+    setBarcodeInfo(''); setBarcodeSource(null)
     if (isEdit && id) {
       const item = items.find(i => i.id === id)
       if (item) {
-        setName(item.name); setBarcode(item.barcode); setBrand(item.brand); setNotes(item.notes)
-        setQuantity(String(item.quantity)); setUnit(item.unit)
+        setName(item.name); setBarcode(item.barcode); setBrand(item.brand)
+        setNotes(item.notes); setQuantity(String(item.quantity)); setUnit(item.unit)
         setPurchasePrice(item.purchasePrice ? String(item.purchasePrice) : '')
         setCategoryId(item.categoryId ?? ''); setLocationId(item.locationId ?? '')
         setPurchaseDate(item.purchaseDate ?? ''); setExpiryDate(item.expiryDate ?? '')
         setImageUrl(item.imageUrl ?? '')
+        setWeightValue(null); setWeightUnit(null)
       }
     } else {
       setName(''); setBarcode(''); setBrand(''); setNotes('')
       setQuantity('1'); setUnit('pz'); setPurchasePrice(''); setImageUrl('')
       setCategoryId(''); setLocationId(activeLocationId ?? '')
       setPurchaseDate(''); setExpiryDate('')
+      setWeightValue(null); setWeightUnit(null)
     }
   }, [id, isEdit])
 
@@ -96,43 +111,61 @@ export function AddItemPage() {
     setPendingNav(null)
   }
 
-  // ── Rilascia camera all'uscita dalla pagina ───────────────────────────────
+  // ── Rilascia camera all'uscita ────────────────────────────────────────────
   useEffect(() => () => {
     stopScanRef.current?.()
-    stopScanner()   // rilascia lo stream completamente
+    stopScanner()
   }, [])
+
+  // ── Gestione risultato lookup ─────────────────────────────────────────────
+  const applyLookupResult = useCallback((info: Awaited<ReturnType<typeof lookupBarcode>>) => {
+    if (info.found) {
+      if (!name  && info.name)  { setName(info.name);   markDirty() }
+      if (!brand && info.brand) { setBrand(info.brand); markDirty() }
+      if (info.weightValue && info.weightUnit) {
+        setQuantity(String(info.weightValue))
+        setUnit(info.weightUnit as ItemUnit)
+        setWeightValue(info.weightValue)
+        setWeightUnit(info.weightUnit)
+        markDirty()
+      }
+      if (info.imageUrl) { setImageUrl(info.imageUrl); markDirty() }
+
+      const sourceLabel: Record<string,string> = {
+        off:       '🥫 Open Food Facts',
+        obf:       '💄 Open Beauty Facts',
+        opff:      '🐾 Open Pet Food Facts',
+        opf:       '📦 Open Products Facts',
+        upc:       '🏪 UPC Item DB',
+        community: '👥 Database community',
+      }
+      const wLabel  = info.weightValue && info.weightUnit ? ` · ${info.weightValue} ${info.weightUnit}` : ''
+      const srcLabel = info.source ? ` (${sourceLabel[info.source] ?? info.source})` : ''
+      setBarcodeInfo(`✓ Trovato: ${info.name || 'Prodotto'}${wLabel}${srcLabel}`)
+      setBarcodeSource(info.source ?? null)
+      setShowContribute(false)
+    } else {
+      setBarcodeInfo('Prodotto non trovato in nessun database.')
+      setBarcodeSource(null)
+      setShowContribute(true)
+    }
+  }, [name, brand])
 
   // ── Avvio scanner ─────────────────────────────────────────────────────────
   const handleStartScan = async () => {
-    setBarcodeInfo('')
+    setBarcodeInfo(''); setShowContribute(false)
     setScanning(true)
-    // Piccolo delay: il DOM deve montare il <video> prima di chiamare startScanner
     setTimeout(async () => {
       if (!videoRef.current) { setScanning(false); return }
       const stop = await startScanner(
         videoRef.current,
         async (code) => {
-          // Codice rilevato
           stop(); stopScanRef.current = null; setScanning(false)
           setBarcode(code); markDirty()
-          setBarcodeLoading(true); setBarcodeInfo('🔍 Ricerca prodotto...')
+          setBarcodeLoading(true); setBarcodeInfo('🔍 Ricerca in corso...')
           const info = await lookupBarcode(code)
           setBarcodeLoading(false)
-          if (info.found) {
-            if (!name  && info.name)  { setName(info.name);  markDirty() }
-            if (!brand && info.brand) { setBrand(info.brand); markDirty() }
-            if (info.weightValue && info.weightUnit) {
-              setQuantity(String(info.weightValue))
-              setUnit(info.weightUnit as ItemUnit)
-              markDirty()
-            }
-            if (info.imageUrl) { setImageUrl(info.imageUrl); markDirty() }
-            const wLabel = info.weightValue && info.weightUnit
-              ? ` · ${info.weightValue} ${info.weightUnit}` : ''
-            setBarcodeInfo(`✓ Trovato: ${info.name || 'Prodotto'}${wLabel}`)
-          } else {
-            setBarcodeInfo('Prodotto non trovato nel database. Compila manualmente.')
-          }
+          applyLookupResult(info)
         },
         (err) => {
           setBarcodeInfo(`⚠️ ${err.message}`)
@@ -144,9 +177,29 @@ export function AddItemPage() {
   }
 
   const handleStopScan = () => {
-    stopScanRef.current?.()
-    stopScanRef.current = null
+    stopScanRef.current?.(); stopScanRef.current = null
     setScanning(false)
+  }
+
+  // ── Contribuisci al database community ───────────────────────────────────
+  const handleContribute = async () => {
+    if (!barcode.trim() || !name.trim()) {
+      setContributeStatus('⚠️ Compila almeno il codice a barre e il nome prima di contribuire.')
+      return
+    }
+    setContributing(true); setContributeStatus('')
+    const uid = (user as unknown as { id?: string; $id?: string })?.id
+           ?? (user as unknown as { id?: string; $id?: string })?.$id
+           ?? ''
+    const contribution: CommunityContribution = {
+      name: name.trim(), brand: brand.trim(),
+      category: '',      imageUrl: imageUrl.trim(),
+      weightValue, weightUnit,
+    }
+    const result = await contributeBarcode(barcode.trim(), contribution, uid)
+    setContributing(false)
+    setContributeStatus(result.ok ? `✓ ${result.message}` : `⚠️ ${result.message}`)
+    if (result.ok) setShowContribute(false)
   }
 
   // ── Salvataggio ───────────────────────────────────────────────────────────
@@ -157,13 +210,15 @@ export function AddItemPage() {
     if (isNaN(qty) || qty <= 0) throw new Error('Quantità non valida.')
     const payload = {
       name: name.trim(), barcode: barcode.trim(), brand: brand.trim(), notes: notes.trim(),
-      quantity: qty, unit, purchasePrice: purchasePrice ? parseFloat(purchasePrice) : undefined,
+      quantity: qty, unit,
+      purchasePrice: purchasePrice ? parseFloat(purchasePrice) : undefined,
       categoryId: categoryId || null, locationId: locationId || null,
       purchaseDate: purchaseDate || null, expiryDate: expiryDate || null,
       imageUrl: imageUrl || null,
     }
-    // user.id (Supabase)
-    const uid = (user as unknown as { id?: string; $id?: string }).id ?? (user as unknown as { id?: string; $id?: string }).$id ?? ""
+    const uid = (user as unknown as { id?: string; $id?: string }).id
+           ?? (user as unknown as { id?: string; $id?: string }).$id
+           ?? ''
     if (isEdit && id) await updateItem(id, uid, payload)
     else await addItem(uid, payload)
     setDirty(false)
@@ -240,14 +295,8 @@ export function AddItemPage() {
 
         {scanning && (
           <div style={{ position:'relative', borderRadius:10, overflow:'hidden', background:'#000', marginBottom:8 }}>
-            {/* playsInline e muted sono critici per iOS Safari */}
-            <video
-              ref={videoRef}
-              style={{ width:'100%', maxHeight:220, objectFit:'cover', display:'block' }}
-              autoPlay
-              muted
-              playsInline
-            />
+            <video ref={videoRef} style={{ width:'100%', maxHeight:220, objectFit:'cover', display:'block' }}
+              autoPlay muted playsInline />
             <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center',
               justifyContent:'center', pointerEvents:'none' }}>
               <div style={{ width:'72%', height:'38%', border:'2px solid var(--accent)',
@@ -256,18 +305,16 @@ export function AddItemPage() {
           </div>
         )}
 
-        {/* Immagine prodotto rilevata */}
         {imageUrl && (
           <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:10 }}>
-            <img
-              src={imageUrl}
-              alt="Immagine prodotto"
+            <img src={imageUrl} alt="Prodotto"
               onError={e => { (e.target as HTMLImageElement).style.display='none' }}
               style={{ width:64, height:64, objectFit:'contain', borderRadius:8,
-                background:'var(--bg-raised)', border:'1px solid var(--border)', padding:4 }}
-            />
+                background:'var(--bg-raised)', border:'1px solid var(--border)', padding:4 }}/>
             <div>
-              <div style={{ fontSize:'0.75rem', color:'var(--text-muted)', marginBottom:4 }}>📸 Immagine dal database</div>
+              <div style={{ fontSize:'0.75rem', color:'var(--text-muted)', marginBottom:4 }}>
+                📸 Immagine dal database
+              </div>
               <button type="button" className="btn btn-ghost btn-sm"
                 style={{ fontSize:'0.72rem', padding:'2px 8px' }}
                 onClick={() => { setImageUrl(''); markDirty() }}>Rimuovi</button>
@@ -276,13 +323,50 @@ export function AddItemPage() {
         )}
 
         {barcodeInfo && (
-          <div className="alert alert-info" style={{ fontSize:'0.8rem', padding:'7px 12px', marginBottom:8 }}>
+          <div className={`alert ${barcodeSource ? 'alert-success' : 'alert-warn'}`}
+            style={{ fontSize:'0.8rem', padding:'7px 12px', marginBottom:8, display:'flex', alignItems:'center', gap:8 }}>
             {barcodeLoading && <span className="spinner" style={{ width:14, height:14 }}/>}
-            {barcodeInfo}
+            <span>{barcodeInfo}</span>
           </div>
         )}
 
-        <div className="field">
+        {/* ── Contribuisci al database community ── */}
+        {showContribute && barcode && (
+          <div className="card" style={{
+            marginTop:10, background:'rgba(245,158,11,0.06)',
+            border:'1px solid rgba(245,158,11,0.25)' }}>
+            <div style={{ fontSize:'0.82rem', fontWeight:600, marginBottom:8 }}>
+              👥 Contribuisci al database condiviso
+            </div>
+            <p style={{ fontSize:'0.78rem', color:'var(--text-secondary)', lineHeight:1.6, marginBottom:12 }}>
+              Questo codice a barre non è in nessun database pubblico.
+              Se inserisci il prodotto manualmente, puoi condividerlo cifrato con tutti gli utenti
+              di StockSafe: la prossima volta verrà riconosciuto automaticamente.
+            </p>
+            {contributeStatus && (
+              <div className={`alert ${contributeStatus.startsWith('✓') ? 'alert-success' : 'alert-warn'}`}
+                style={{ fontSize:'0.78rem', marginBottom:10 }}>
+                {contributeStatus}
+              </div>
+            )}
+            <div style={{ display:'flex', gap:8 }}>
+              <button type="button" className="btn btn-primary btn-sm"
+                style={{ flex:1 }} disabled={contributing || !name.trim()}
+                onClick={handleContribute}>
+                {contributing ? <span className="spinner" style={{ width:14, height:14 }}/> : '📤 Condividi con la community'}
+              </button>
+              <button type="button" className="btn btn-ghost btn-sm"
+                onClick={() => setShowContribute(false)}>Non ora</button>
+            </div>
+            {!name.trim() && (
+              <p style={{ fontSize:'0.72rem', color:'var(--text-muted)', marginTop:6 }}>
+                Compila almeno il nome del prodotto per poter contribuire.
+              </p>
+            )}
+          </div>
+        )}
+
+        <div className="field" style={{ marginTop:10 }}>
           <label>Codice manuale</label>
           <div className="input-group">
             <input type="text" className="input" value={barcode}
@@ -291,22 +375,11 @@ export function AddItemPage() {
             {barcode && (
               <button type="button" className="btn btn-ghost btn-sm"
                 onClick={async () => {
-                  setBarcodeLoading(true); setBarcodeInfo('Ricerca...')
+                  setBarcodeLoading(true); setBarcodeInfo('🔍 Ricerca in corso...')
+                  setShowContribute(false); setContributeStatus('')
                   const info = await lookupBarcode(barcode)
                   setBarcodeLoading(false)
-                  if (info.found) {
-                    if (!name  && info.name)  { setName(info.name);   markDirty() }
-                    if (!brand && info.brand) { setBrand(info.brand); markDirty() }
-                    if (info.weightValue && info.weightUnit) {
-                      setQuantity(String(info.weightValue))
-                      setUnit(info.weightUnit as ItemUnit)
-                      markDirty()
-                    }
-                    if (info.imageUrl) { setImageUrl(info.imageUrl); markDirty() }
-                    const wLabel = info.weightValue && info.weightUnit
-                      ? ` · ${info.weightValue} ${info.weightUnit}` : ''
-                    setBarcodeInfo(`✓ ${info.name || 'Trovato'}${wLabel}`)
-                  } else setBarcodeInfo('Non trovato in nessun database.')
+                  applyLookupResult(info)
                 }}>Cerca</button>
             )}
           </div>
