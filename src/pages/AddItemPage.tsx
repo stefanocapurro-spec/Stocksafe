@@ -55,7 +55,7 @@ export function AddItemPage() {
   const [barcodeLoading, setBarcodeLoading] = useState(false)
   const [barcodeInfo, setBarcodeInfo]     = useState('')
   const [barcodeSource, setBarcodeSource] = useState<string|null>(null)
-  const canvasRef   = useRef<HTMLCanvasElement>(null)
+  const scannerContainerRef = useRef<HTMLDivElement>(null)
   const stopScanRef = useRef<(()=>void)|null>(null)
 
   // ── Community contribute state ────────────────────────────────────────────
@@ -156,9 +156,9 @@ export function AddItemPage() {
     setBarcodeInfo(''); setShowContribute(false)
     setScanning(true)
     setTimeout(async () => {
-      if (!canvasRef.current) { setScanning(false); return }
+      if (!scannerContainerRef.current) { setScanning(false); return }
       const stop = await startScanner(
-        canvasRef.current,
+        scannerContainerRef.current,
         async (code) => {
           stop(); stopScanRef.current = null; setScanning(false)
           setBarcode(code); markDirty()
@@ -294,13 +294,24 @@ export function AddItemPage() {
         </div>
 
         {scanning && (
-          <div style={{ position:'relative', borderRadius:10, overflow:'hidden', background:'#000', marginBottom:8 }}>
-            <canvas ref={canvasRef}
-              style={{ width:'100%', maxHeight:220, objectFit:'contain', display:'block',
-                background:'#000', borderRadius:4 }}/>
+          <div
+            ref={scannerContainerRef}
+            style={{
+              position: 'relative',
+              borderRadius: 10,
+              overflow: 'hidden',
+              background: '#000',
+              marginBottom: 8,
+              /* Altezza fissa: il video (position:absolute) si adatta */
+              height: 220,
+              width: '100%',
+            }}
+          >
+            {/* Il <video> viene iniettato qui da startScanner() */}
+            {/* Overlay: mirino centrato */}
             <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center',
-              justifyContent:'center', pointerEvents:'none' }}>
-              <div style={{ width:'72%', height:'38%', border:'2px solid var(--accent)',
+              justifyContent:'center', pointerEvents:'none', zIndex:2 }}>
+              <div style={{ width:'72%', height:'50%', border:'2px solid var(--accent)',
                 borderRadius:8, boxShadow:'0 0 0 9999px rgba(0,0,0,0.4)' }}/>
             </div>
           </div>

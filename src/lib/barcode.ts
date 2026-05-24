@@ -1,30 +1,39 @@
 /**
- * StockSafe – Barcode Scanner v7 (canvas-based, iOS PWA fix definitivo)
+ * StockSafe – Barcode Scanner v8 (redesign completo cross-platform)
  *
- * Strategia display: video NASCOSTO + canvas VISIBILE
- *  - Il video con srcObject non è mai visibile all'utente
- *  - Un loop copia i frame video sul canvas ogni 50ms
- *  - Il canvas è ciò che l'utente vede
- *  - La decodifica avviene sullo stesso canvas
- *
- * Questo bypassa completamente il bug di iOS PWA dove il <video> rimane nero.
+ * Architettura:
+ *  - Il <video> viene iniettato VISIBILE nel container passato dal componente
+ *    (non più nascosto a -9999px → fix iOS PWA black screen definitivo)
+ *  - BarcodeDetector nativo (Chrome/Edge/Android) → detect() direttamente sul video
+ *  - ZXing fallback → canvas OFFSCREEN (mai nel DOM), draw del frame video, decode
+ *  - iOS Safari: video visibile + canvas offscreen. Il video è il viewfinder.
+ *  - Nessun "copia frame su canvas visibile": il video stesso è il preview
  *
  * Lookup cascade: OFF world/IT → Beauty → PetFood → Products → UPC → Community
  */
 
+// ── Rilevamento piattaforma ───────────────────────────────────────────────────
+
+function isIOS(): boolean {
+  return (
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  )
+}
+
 // ── Stream caching ────────────────────────────────────────────────────────────
 
 let cachedStream: MediaStream | null = null
-// Video element nascosto riutilizzato tra sessioni
-let hiddenVideo: HTMLVideoElement | null = null
 
 async function getStream(): Promise<MediaStream> {
   if (cachedStream?.active) return cachedStream
 
+  // Cascade di constraints: da più specifico a più generico
   const attempts: MediaStreamConstraints['video'][] = [
     { facingMode: { exact: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
     { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
     { facingMode: 'environment' },
+    { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } },
     true,
   ]
 
@@ -33,7 +42,9 @@ async function getStream(): Promise<MediaStream> {
     try {
       cachedStream = await navigator.mediaDevices.getUserMedia({ video, audio: false })
       return cachedStream
-    } catch (e) { lastErr = e }
+    } catch (e) {
+      lastErr = e
+    }
   }
   throw lastErr
 }
@@ -41,48 +52,53 @@ async function getStream(): Promise<MediaStream> {
 export function releaseStream() {
   cachedStream?.getTracks().forEach(t => t.stop())
   cachedStream = null
-  if (hiddenVideo) {
-    hiddenVideo.srcObject = null
-    hiddenVideo.remove()
-    hiddenVideo = null
-  }
 }
 
-// ── Video nascosto (singleton) ────────────────────────────────────────────────
+// ── Crea e avvia video nel container ─────────────────────────────────────────
+//
+// Il video è VISIBILE (è il viewfinder), non nascosto.
+// Su iOS questo è il fix definitivo: WebKit decodifica solo i frame di video
+// che sono nel render tree con dimensioni non-zero.
 
-function getHiddenVideo(): HTMLVideoElement {
-  if (!hiddenVideo) {
-    hiddenVideo = document.createElement('video')
-    // Tutti gli attributi necessari per iOS
-    hiddenVideo.muted       = true
-    hiddenVideo.playsInline = true
-    hiddenVideo.setAttribute('playsinline', '')
-    hiddenVideo.setAttribute('webkit-playsinline', '')
-    hiddenVideo.setAttribute('autoplay', '')
-    hiddenVideo.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;'
-    document.body.appendChild(hiddenVideo)
-  }
-  return hiddenVideo
+function createVideoInContainer(container: HTMLElement): HTMLVideoElement {
+  const video = document.createElement('video')
+  video.muted        = true
+  video.playsInline  = true
+  video.setAttribute('playsinline',        '')
+  video.setAttribute('webkit-playsinline', '')
+  video.setAttribute('autoplay',           '')
+  video.style.cssText = [
+    'position:absolute',
+    'inset:0',
+    'width:100%',
+    'height:100%',
+    'object-fit:cover',
+    'border-radius:inherit',
+    // Su iOS, display:block + dimensioni reali = pipeline video attiva
+    'display:block',
+  ].join(';')
+  container.appendChild(video)
+  return video
 }
 
-// ── Avvio stream sul video nascosto ───────────────────────────────────────────
-
-async function startHiddenVideo(stream: MediaStream): Promise<HTMLVideoElement> {
-  const video = getHiddenVideo()
+async function startVideo(
+  video: HTMLVideoElement,
+  stream: MediaStream
+): Promise<void> {
   video.srcObject = stream
 
-  // Tenta play subito
-  try { await video.play() } catch { /* riprova dopo gli eventi */ }
+  // Primo tentativo di play (necessario su iOS dopo assegnazione srcObject)
+  try { await video.play() } catch { /* riprova dopo eventi */ }
 
-  // Aspetta che il video abbia dimensioni (polling + eventi)
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
       cleanup()
       reject(new Error(
-        'Fotocamera non disponibile. Su iPhone: Impostazioni → ' +
-        'Privacy e Sicurezza → Fotocamera → Safari (o StockSafe) → Consenti'
+        'Fotocamera non disponibile.\n' +
+        'Su iPhone/iPad: Impostazioni → Privacy e Sicurezza → Fotocamera\n' +
+        '→ Safari (o StockSafe) → Consenti'
       ))
-    }, 12000)
+    }, 15000)
 
     const check = () => {
       if (video.videoWidth > 0 && video.videoHeight > 0) {
@@ -93,9 +109,7 @@ async function startHiddenVideo(stream: MediaStream): Promise<HTMLVideoElement> 
     const poll = setInterval(check, 80)
 
     const onEvent = () => {
-      if (video.paused) {
-        video.play().catch(() => {})
-      }
+      if (video.paused) video.play().catch(() => {})
       check()
     }
 
@@ -105,7 +119,7 @@ async function startHiddenVideo(stream: MediaStream): Promise<HTMLVideoElement> 
     video.addEventListener('playing',        onEvent)
     video.addEventListener('error', () => {
       cleanup()
-      reject(new Error('Errore stream video'))
+      reject(new Error('Errore stream video. Riprova.'))
     }, { once: true })
 
     const cleanup = () => {
@@ -117,18 +131,14 @@ async function startHiddenVideo(stream: MediaStream): Promise<HTMLVideoElement> 
       video.removeEventListener('playing',        onEvent)
     }
 
-    // Se già pronto
     check()
   })
 
-  // Assicura che sia in play
   if (video.paused) {
-    try { await video.play() } catch (e) {
+    try { await video.play() } catch {
       throw new Error('Impossibile avviare la fotocamera. Controlla i permessi.')
     }
   }
-
-  return video
 }
 
 // ── BarcodeDetector nativo ────────────────────────────────────────────────────
@@ -144,85 +154,138 @@ async function getNativeDetector(): Promise<NativeDetector | null> {
   if (!BD) return null
   try {
     const supported = await BD.getSupportedFormats()
-    const want = ['ean_13','ean_8','upc_a','upc_e','qr_code','code_128','code_39','itf','codabar']
-    return new BD({ formats: want.filter(f => supported.includes(f)) })
-  } catch { return null }
+    const want = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'qr_code', 'code_128', 'code_39', 'itf', 'codabar']
+    const formats = want.filter(f => supported.includes(f))
+    if (formats.length === 0) return null
+    return new BD({ formats })
+  } catch {
+    return null
+  }
 }
 
-// ── ZXing decode su canvas ────────────────────────────────────────────────────
+// ── ZXing decode su canvas OFFSCREEN ─────────────────────────────────────────
+//
+// Il canvas NON è mai nel DOM. Viene creato, usato per decode, e basta.
+// Nessun problema di iOS qui: la sorgente è il video visibile nel DOM.
 
 type ZXingReader = { decode(bmp: unknown): { getText(): string } }
 
-async function makeZxingReader(): Promise<ZXingReader | null> {
+let zxingReaderInstance: ZXingReader | null = null
+
+async function getZxingReader(): Promise<ZXingReader | null> {
+  if (zxingReaderInstance) return zxingReaderInstance
   try {
     const zx = await import('@zxing/library')
-    return new (zx.MultiFormatReader as new () => ZXingReader)()
-  } catch { return null }
+    zxingReaderInstance = new (zx.MultiFormatReader as new () => ZXingReader)()
+    return zxingReaderInstance
+  } catch {
+    return null
+  }
 }
 
-async function decodeCanvas(
-  canvas: HTMLCanvasElement,
+// Canvas offscreen riutilizzato (evita allocazioni ripetute)
+let offscreenCanvas: HTMLCanvasElement | null = null
+let offscreenCtx: CanvasRenderingContext2D | null = null
+
+function getOffscreenCanvas(w: number, h: number): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } {
+  if (!offscreenCanvas) {
+    offscreenCanvas = document.createElement('canvas')
+    offscreenCtx    = offscreenCanvas.getContext('2d')!
+  }
+  if (offscreenCanvas.width !== w)  offscreenCanvas.width  = w
+  if (offscreenCanvas.height !== h) offscreenCanvas.height = h
+  return { canvas: offscreenCanvas, ctx: offscreenCtx! }
+}
+
+async function decodeWithZxing(
+  video: HTMLVideoElement,
   reader: ZXingReader
 ): Promise<string | null> {
+  const w = video.videoWidth, h = video.videoHeight
+  if (!w || !h) return null
   try {
+    const { canvas, ctx } = getOffscreenCanvas(w, h)
+    ctx.drawImage(video, 0, 0, w, h)
     const zx     = await import('@zxing/library')
     const source = new zx.HTMLCanvasElementLuminanceSource(canvas)
     const bmp    = new zx.BinaryBitmap(new zx.HybridBinarizer(source))
     return reader.decode(bmp)?.getText() ?? null
-  } catch { return null }
+  } catch {
+    // NotFoundException è normale su ogni frame senza barcode → silenzio
+    return null
+  }
 }
 
 // ── Scanner principale ────────────────────────────────────────────────────────
-// canvasEl: il canvas VISIBILE passato da AddItemPage
+//
+// container: div visibile nel DOM (passato da AddItemPage).
+// Il video viene iniettato dentro di esso; alla chiusura viene rimosso.
 
 export async function startScanner(
-  canvasEl: HTMLCanvasElement,
+  container: HTMLDivElement,
   onDetect: (code: string) => void,
   onError?: (err: Error) => void
 ): Promise<() => void> {
-  let stopped = false
+  let stopped  = false
   let rafId: number | null = null
-  const ctx = canvasEl.getContext('2d')!
+  let videoEl: HTMLVideoElement | null = null
+
+  const stop = () => {
+    stopped = true
+    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
+    if (videoEl) {
+      videoEl.srcObject = null
+      videoEl.pause()
+      videoEl.remove()
+      videoEl = null
+    }
+    // NON rilasciamo lo stream globale qui: viene gestito da stopScanner()
+  }
 
   try {
     const stream = await getStream()
-    const video  = await startHiddenVideo(stream)
 
-    const nativeDetector = await getNativeDetector()
-    const zxingReader    = nativeDetector ? null : await makeZxingReader()
+    videoEl = createVideoInContainer(container)
+    await startVideo(videoEl, stream)
 
-    if (!nativeDetector && !zxingReader) {
-      onError?.(new Error('Libreria barcode non disponibile.'))
-      return () => { stopped = true }
+    const native   = await getNativeDetector()
+    const zxReader = native ? null : await getZxingReader()
+
+    if (!native && !zxReader) {
+      onError?.(new Error('Libreria barcode non disponibile su questo browser.'))
+      stop()
+      return stop
+    }
+
+    // Su iOS senza BarcodeDetector, aspetta un frame in più per sicurezza
+    if (isIOS() && !native) {
+      await new Promise(r => setTimeout(r, 200))
     }
 
     let lastDecodeTime = 0
-    const DECODE_INTERVAL = 150  // decodifica ogni 150ms
+    // Intervallo di decodifica: 200ms su iOS (più conservativo), 120ms altrove
+    const DECODE_INTERVAL = isIOS() ? 200 : 120
 
     const tick = async (now: number) => {
       if (stopped) return
       rafId = requestAnimationFrame(tick)
 
-      // Copia frame dal video nascosto al canvas visibile
-      if (video.videoWidth > 0 && video.videoHeight > 0) {
-        canvasEl.width  = video.videoWidth
-        canvasEl.height = video.videoHeight
-        ctx.drawImage(video, 0, 0)
-      }
-
-      // Decodifica a intervalli per non sovraccaricare
       if (now - lastDecodeTime < DECODE_INTERVAL) return
       lastDecodeTime = now
 
-      if (canvasEl.width === 0) return
+      if (!videoEl || videoEl.videoWidth === 0) return
 
       try {
-        if (nativeDetector) {
-          const hits = await nativeDetector.detect(canvasEl)
-          if (hits[0]?.rawValue && !stopped) { onDetect(hits[0].rawValue); return }
-        } else if (zxingReader) {
-          const code = await decodeCanvas(canvasEl, zxingReader)
-          if (code && !stopped) { onDetect(code); return }
+        let code: string | null = null
+        if (native) {
+          const hits = await native.detect(videoEl)
+          code = hits[0]?.rawValue ?? null
+        } else if (zxReader) {
+          code = await decodeWithZxing(videoEl, zxReader)
+        }
+        if (code && !stopped) {
+          stop()
+          onDetect(code)
         }
       } catch { /* frame non decodificabile */ }
     }
@@ -230,17 +293,18 @@ export async function startScanner(
     rafId = requestAnimationFrame(tick)
 
   } catch (e) {
+    stop()
     onError?.(e as Error)
   }
 
-  return () => {
-    stopped = true
-    if (rafId !== null) cancelAnimationFrame(rafId)
-    // Non rilasciamo lo stream — solo fermiamo il loop
-  }
+  return stop
 }
 
-export function stopScanner() { releaseStream() }
+export function stopScanner() {
+  releaseStream()
+  offscreenCanvas = null
+  offscreenCtx    = null
+}
 
 // ── ProductInfo + lookup ──────────────────────────────────────────────────────
 
@@ -272,15 +336,15 @@ function parseQuantityString(raw: string | null | undefined): { val: number | nu
 }
 
 const empty = (barcode: string): ProductInfo => ({
-  name:'', brand:'', category:'', imageUrl:'', barcode, found:false,
+  name: '', brand: '', category: '', imageUrl: '', barcode, found: false,
   weightValue: null, weightUnit: null,
 })
 
-type OFFHost = 'world.openfoodfacts'|'world.openbeautyfacts'|'world.openpetfoodfacts'|'world.openproductsfacts'
+type OFFHost = 'world.openfoodfacts' | 'world.openbeautyfacts' | 'world.openpetfoodfacts' | 'world.openproductsfacts'
 
 async function fetchOpenFacts(barcode: string, host: OFFHost, sourceName: string): Promise<ProductInfo | null> {
   try {
-    const res  = await fetch(
+    const res = await fetch(
       `https://${host}.org/api/v2/product/${encodeURIComponent(barcode)}?fields=product_name,product_name_it,brands,categories_tags,image_front_small_url,quantity,product_quantity`,
       { signal: AbortSignal.timeout(7000) }
     )
@@ -294,17 +358,22 @@ async function fetchOpenFacts(barcode: string, host: OFFHost, sourceName: string
       .find((t: string) => t.startsWith('it:')) ?? (p.categories_tags as string[])?.[0] ?? ''
     const { val: weightValue, unit: weightUnit } = parseQuantityString(p.quantity ?? p.product_quantity)
     return {
-      name, brand: (p.brands || '').split(',')[0].trim(),
-      category: catTag.replace(/^[a-z]{2}:/, '').replace(/-/g, ' '),
-      imageUrl: p.image_front_small_url || '',
-      barcode, found: true, weightValue, weightUnit, source: sourceName,
+      name,
+      brand:       (p.brands || '').split(',')[0].trim(),
+      category:    catTag.replace(/^[a-z]{2}:/, '').replace(/-/g, ' '),
+      imageUrl:    p.image_front_small_url || '',
+      barcode,
+      found:       true,
+      weightValue,
+      weightUnit,
+      source:      sourceName,
     }
   } catch { return null }
 }
 
 async function fetchUpcItemDb(barcode: string): Promise<ProductInfo | null> {
   try {
-    const res  = await fetch(
+    const res = await fetch(
       `https://api.upcitemdb.com/prod/trial/lookup?upc=${encodeURIComponent(barcode)}`,
       { signal: AbortSignal.timeout(7000) }
     )
@@ -314,9 +383,15 @@ async function fetchUpcItemDb(barcode: string): Promise<ProductInfo | null> {
     if (!item) return null
     const wm = (item.title ?? '').toLowerCase().match(/(\d+(?:\.\d+)?)\s*(g|kg|ml|l|cl|mg)\b/)
     return {
-      name: item.title || '', brand: item.brand || '', category: item.category || '',
-      imageUrl: item.images?.[0] || '', barcode, found: true,
-      weightValue: wm ? parseFloat(wm[1]) : null, weightUnit: wm ? wm[2] : null, source: 'upc',
+      name:        item.title  || '',
+      brand:       item.brand  || '',
+      category:    item.category || '',
+      imageUrl:    item.images?.[0] || '',
+      barcode,
+      found:       true,
+      weightValue: wm ? parseFloat(wm[1]) : null,
+      weightUnit:  wm ? wm[2] : null,
+      source:      'upc',
     }
   } catch { return null }
 }
