@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useAuthStore }      from '../stores/authStore'
 import { useInventoryStore, type ItemUnit } from '../stores/inventoryStore'
 import { useLocationStore }  from '../stores/locationStore'
-import { startScanner, stopScanner, lookupBarcode } from '../lib/barcode'
+import { getStream, startScanner, stopScanner, lookupBarcode } from '../lib/barcode'
 import { contributeBarcode, type CommunityContribution } from '../lib/communityDb'
 import { calcRemindDate }    from '../lib/calendar'
 
@@ -152,13 +152,23 @@ export function AddItemPage() {
   }, [name, brand])
 
   // ── Avvio scanner ─────────────────────────────────────────────────────────
+  // CRITICO iOS: getStream() deve essere chiamato IMMEDIATAMENTE nell'handler
+  // del click (stessa catena microtask). setTimeout() rompe il contesto gesto
+  // su iOS → camera nera. Il container è sempre nel DOM (visibile/nascosto via
+  // CSS) quindi scannerContainerRef.current è sempre disponibile.
   const handleStartScan = async () => {
     setBarcodeInfo(''); setShowContribute(false)
-    setScanning(true)
-    setTimeout(async () => {
+    try {
+      // 1. Acquisisci lo stream SUBITO, nel contesto del gesto utente
+      const stream = await getStream()
+      // 2. Ora mostra l'UI scanner (re-render asincrono non influenza lo stream)
+      setScanning(true)
+      // 3. Il container è già nel DOM (display:none → block via CSS),
+      //    startScanner riceve lo stream già pronto
       if (!scannerContainerRef.current) { setScanning(false); return }
       const stop = await startScanner(
         scannerContainerRef.current,
+        stream,
         async (code) => {
           stop(); stopScanRef.current = null; setScanning(false)
           setBarcode(code); markDirty()
@@ -173,7 +183,10 @@ export function AddItemPage() {
         }
       )
       stopScanRef.current = stop
-    }, 150)
+    } catch (err) {
+      setBarcodeInfo(`⚠️ ${(err as Error).message}`)
+      setScanning(false)
+    }
   }
 
   const handleStopScan = () => {
@@ -293,29 +306,33 @@ export function AddItemPage() {
           }
         </div>
 
-        {scanning && (
-          <div
-            ref={scannerContainerRef}
-            style={{
-              position: 'relative',
-              borderRadius: 10,
-              overflow: 'hidden',
-              background: '#000',
-              marginBottom: 8,
-              /* Altezza fissa: il video (position:absolute) si adatta */
-              height: 220,
-              width: '100%',
-            }}
-          >
-            {/* Il <video> viene iniettato qui da startScanner() */}
-            {/* Overlay: mirino centrato */}
+        {/* Container scanner: SEMPRE nel DOM, hidden via CSS quando non attivo.
+            Questo garantisce che scannerContainerRef.current sia disponibile
+            prima del re-render React, fondamentale per iOS. */}
+        <div
+          ref={scannerContainerRef}
+          style={{
+            position:     'relative',
+            borderRadius: 10,
+            overflow:     'hidden',
+            background:   '#000',
+            marginBottom: scanning ? 8 : 0,
+            height:       scanning ? 220 : 0,
+            width:        '100%',
+            // display:none impedirebbe il layout su iOS; usiamo height:0
+            visibility:   scanning ? 'visible' : 'hidden',
+            pointerEvents: scanning ? 'auto' : 'none',
+          }}
+        >
+          {/* Il <video> viene iniettato qui da startScanner() */}
+          {scanning && (
             <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center',
               justifyContent:'center', pointerEvents:'none', zIndex:2 }}>
               <div style={{ width:'72%', height:'50%', border:'2px solid var(--accent)',
                 borderRadius:8, boxShadow:'0 0 0 9999px rgba(0,0,0,0.4)' }}/>
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
         {imageUrl && (
           <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:10 }}>

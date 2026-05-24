@@ -1,34 +1,37 @@
 /**
- * StockSafe – Barcode Scanner v8 (redesign completo cross-platform)
+ * StockSafe – Barcode Scanner v9
  *
- * Architettura:
- *  - Il <video> viene iniettato VISIBILE nel container passato dal componente
- *    (non più nascosto a -9999px → fix iOS PWA black screen definitivo)
- *  - BarcodeDetector nativo (Chrome/Edge/Android) → detect() direttamente sul video
- *  - ZXing fallback → canvas OFFSCREEN (mai nel DOM), draw del frame video, decode
- *  - iOS Safari: video visibile + canvas offscreen. Il video è il viewfinder.
- *  - Nessun "copia frame su canvas visibile": il video stesso è il preview
+ * Fix critico iOS: getUserMedia e video.play() DEVONO essere chiamati nella
+ * stessa catena microtask del gesto utente (click). setTimeout() rompe questo
+ * contesto su iOS → camera nera. La soluzione è:
+ *   1. getStream() esportata e chiamata DAL COMPONENTE prima di setScanning(true)
+ *   2. startScanner() riceve lo stream già pronto (nessuna chiamata getUserMedia interna)
+ *   3. Nessun setTimeout() nel percorso critico
  *
- * Lookup cascade: OFF world/IT → Beauty → PetFood → Products → UPC → Community
+ * Architettura display:
+ *   - <video> iniettato VISIBILE nel container (fix iOS PWA black screen)
+ *   - BarcodeDetector nativo (Chrome/Android/Edge) → detect() sul video
+ *   - ZXing fallback → canvas offscreen (mai nel DOM)
  */
 
 // ── Rilevamento piattaforma ───────────────────────────────────────────────────
 
-function isIOS(): boolean {
+export function isIOS(): boolean {
   return (
     /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
   )
 }
 
-// ── Stream caching ────────────────────────────────────────────────────────────
+// ── Stream: esportata per essere chiamata dal componente nel gesto utente ─────
 
 let cachedStream: MediaStream | null = null
 
-async function getStream(): Promise<MediaStream> {
+/** Deve essere chiamata DIRETTAMENTE dall'handler onClick (await in async fn).
+ *  Mai dentro setTimeout o callback async non collegata al gesto. */
+export async function getStream(): Promise<MediaStream> {
   if (cachedStream?.active) return cachedStream
 
-  // Cascade di constraints: da più specifico a più generico
   const attempts: MediaStreamConstraints['video'][] = [
     { facingMode: { exact: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
     { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -54,11 +57,10 @@ export function releaseStream() {
   cachedStream = null
 }
 
-// ── Crea e avvia video nel container ─────────────────────────────────────────
+// ── Crea video VISIBILE nel container ────────────────────────────────────────
 //
-// Il video è VISIBILE (è il viewfinder), non nascosto.
-// Su iOS questo è il fix definitivo: WebKit decodifica solo i frame di video
-// che sono nel render tree con dimensioni non-zero.
+// Il video deve avere dimensioni > 0 nel render tree per iOS.
+// Non usare display:none, visibility:hidden, o posizione fuori schermo.
 
 function createVideoInContainer(container: HTMLElement): HTMLVideoElement {
   const video = document.createElement('video')
@@ -74,7 +76,6 @@ function createVideoInContainer(container: HTMLElement): HTMLVideoElement {
     'height:100%',
     'object-fit:cover',
     'border-radius:inherit',
-    // Su iOS, display:block + dimensioni reali = pipeline video attiva
     'display:block',
   ].join(';')
   container.appendChild(video)
@@ -87,16 +88,16 @@ async function startVideo(
 ): Promise<void> {
   video.srcObject = stream
 
-  // Primo tentativo di play (necessario su iOS dopo assegnazione srcObject)
-  try { await video.play() } catch { /* riprova dopo eventi */ }
+  // play() su video muted + playsInline non richiede gesto utente su iOS
+  try { await video.play() } catch { /* gestito sotto */ }
 
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
       cleanup()
       reject(new Error(
         'Fotocamera non disponibile.\n' +
-        'Su iPhone/iPad: Impostazioni → Privacy e Sicurezza → Fotocamera\n' +
-        '→ Safari (o StockSafe) → Consenti'
+        'Su iPhone/iPad: Impostazioni → Safari → Fotocamera → Consenti\n' +
+        '(oppure Impostazioni → Privacy → Fotocamera se usi la PWA)'
       ))
     }, 15000)
 
@@ -119,7 +120,7 @@ async function startVideo(
     video.addEventListener('playing',        onEvent)
     video.addEventListener('error', () => {
       cleanup()
-      reject(new Error('Errore stream video. Riprova.'))
+      reject(new Error('Errore stream video. Riprova o ricarica la pagina.'))
     }, { once: true })
 
     const cleanup = () => {
@@ -163,10 +164,7 @@ async function getNativeDetector(): Promise<NativeDetector | null> {
   }
 }
 
-// ── ZXing decode su canvas OFFSCREEN ─────────────────────────────────────────
-//
-// Il canvas NON è mai nel DOM. Viene creato, usato per decode, e basta.
-// Nessun problema di iOS qui: la sorgente è il video visibile nel DOM.
+// ── ZXing su canvas offscreen ─────────────────────────────────────────────────
 
 type ZXingReader = { decode(bmp: unknown): { getText(): string } }
 
@@ -183,46 +181,42 @@ async function getZxingReader(): Promise<ZXingReader | null> {
   }
 }
 
-// Canvas offscreen riutilizzato (evita allocazioni ripetute)
 let offscreenCanvas: HTMLCanvasElement | null = null
-let offscreenCtx: CanvasRenderingContext2D | null = null
+let offscreenCtx:    CanvasRenderingContext2D | null = null
 
-function getOffscreenCanvas(w: number, h: number): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } {
+function getOffscreen(w: number, h: number) {
   if (!offscreenCanvas) {
     offscreenCanvas = document.createElement('canvas')
     offscreenCtx    = offscreenCanvas.getContext('2d')!
   }
-  if (offscreenCanvas.width !== w)  offscreenCanvas.width  = w
+  if (offscreenCanvas.width  !== w) offscreenCanvas.width  = w
   if (offscreenCanvas.height !== h) offscreenCanvas.height = h
   return { canvas: offscreenCanvas, ctx: offscreenCtx! }
 }
 
-async function decodeWithZxing(
-  video: HTMLVideoElement,
-  reader: ZXingReader
-): Promise<string | null> {
+async function decodeWithZxing(video: HTMLVideoElement, reader: ZXingReader): Promise<string | null> {
   const w = video.videoWidth, h = video.videoHeight
   if (!w || !h) return null
   try {
-    const { canvas, ctx } = getOffscreenCanvas(w, h)
+    const { canvas, ctx } = getOffscreen(w, h)
     ctx.drawImage(video, 0, 0, w, h)
     const zx     = await import('@zxing/library')
     const source = new zx.HTMLCanvasElementLuminanceSource(canvas)
     const bmp    = new zx.BinaryBitmap(new zx.HybridBinarizer(source))
     return reader.decode(bmp)?.getText() ?? null
   } catch {
-    // NotFoundException è normale su ogni frame senza barcode → silenzio
     return null
   }
 }
 
 // ── Scanner principale ────────────────────────────────────────────────────────
 //
-// container: div visibile nel DOM (passato da AddItemPage).
-// Il video viene iniettato dentro di esso; alla chiusura viene rimosso.
+// NOTA: lo stream viene passato già pronto dal componente.
+// Questo garantisce che getUserMedia sia stato chiamato nel gesto utente.
 
 export async function startScanner(
   container: HTMLDivElement,
+  stream: MediaStream,
   onDetect: (code: string) => void,
   onError?: (err: Error) => void
 ): Promise<() => void> {
@@ -234,17 +228,14 @@ export async function startScanner(
     stopped = true
     if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
     if (videoEl) {
-      videoEl.srcObject = null
       videoEl.pause()
+      videoEl.srcObject = null
       videoEl.remove()
       videoEl = null
     }
-    // NON rilasciamo lo stream globale qui: viene gestito da stopScanner()
   }
 
   try {
-    const stream = await getStream()
-
     videoEl = createVideoInContainer(container)
     await startVideo(videoEl, stream)
 
@@ -257,13 +248,7 @@ export async function startScanner(
       return stop
     }
 
-    // Su iOS senza BarcodeDetector, aspetta un frame in più per sicurezza
-    if (isIOS() && !native) {
-      await new Promise(r => setTimeout(r, 200))
-    }
-
     let lastDecodeTime = 0
-    // Intervallo di decodifica: 200ms su iOS (più conservativo), 120ms altrove
     const DECODE_INTERVAL = isIOS() ? 200 : 120
 
     const tick = async (now: number) => {
@@ -359,14 +344,10 @@ async function fetchOpenFacts(barcode: string, host: OFFHost, sourceName: string
     const { val: weightValue, unit: weightUnit } = parseQuantityString(p.quantity ?? p.product_quantity)
     return {
       name,
-      brand:       (p.brands || '').split(',')[0].trim(),
-      category:    catTag.replace(/^[a-z]{2}:/, '').replace(/-/g, ' '),
-      imageUrl:    p.image_front_small_url || '',
-      barcode,
-      found:       true,
-      weightValue,
-      weightUnit,
-      source:      sourceName,
+      brand:    (p.brands || '').split(',')[0].trim(),
+      category: catTag.replace(/^[a-z]{2}:/, '').replace(/-/g, ' '),
+      imageUrl: p.image_front_small_url || '',
+      barcode, found: true, weightValue, weightUnit, source: sourceName,
     }
   } catch { return null }
 }
@@ -383,15 +364,14 @@ async function fetchUpcItemDb(barcode: string): Promise<ProductInfo | null> {
     if (!item) return null
     const wm = (item.title ?? '').toLowerCase().match(/(\d+(?:\.\d+)?)\s*(g|kg|ml|l|cl|mg)\b/)
     return {
-      name:        item.title  || '',
-      brand:       item.brand  || '',
+      name:        item.title    || '',
+      brand:       item.brand    || '',
       category:    item.category || '',
       imageUrl:    item.images?.[0] || '',
-      barcode,
-      found:       true,
+      barcode, found: true,
       weightValue: wm ? parseFloat(wm[1]) : null,
       weightUnit:  wm ? wm[2] : null,
-      source:      'upc',
+      source: 'upc',
     }
   } catch { return null }
 }
