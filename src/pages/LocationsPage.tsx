@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { NavLink } from 'react-router-dom'
 import { useAuthStore }      from '../stores/authStore'
 import { useLocationStore }  from '../stores/locationStore'
 import { useInventoryStore } from '../stores/inventoryStore'
@@ -245,6 +246,24 @@ export function LocationsPage() {
           )
         })}
       </div>
+      {/* Link categorie */}
+      <NavLink to="/categories" style={{ textDecoration:'none' }}>
+        <div className="card" style={{
+          display:'flex', alignItems:'center', gap:12,
+          marginTop:16, cursor:'pointer',
+          borderColor:'var(--accent-border)',
+        }}>
+          <span style={{ fontSize:'1.3rem' }}>🏷️</span>
+          <div style={{ flex:1 }}>
+            <div style={{ fontWeight:700, color:'var(--accent)' }}>Gestisci categorie</div>
+            <div style={{ fontSize:'0.78rem', color:'var(--text-muted)' }}>
+              Aggiungi, modifica o elimina le categorie prodotti
+            </div>
+          </div>
+          <span style={{ color:'var(--text-muted)', fontSize:'1rem' }}>›</span>
+        </div>
+      </NavLink>
+
       <div style={{ height:24 }}/>
     </div>
   )
