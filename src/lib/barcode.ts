@@ -1,21 +1,26 @@
 /**
- * StockSafe – Barcode Scanner v6 (iOS PWA fix)
+ * StockSafe – Barcode Scanner v7 (canvas-based, iOS PWA fix definitivo)
  *
- * Problema iOS PWA: loadedmetadata non viene mai emesso dentro una PWA
- * installata (standalone). Fix: ascolta 4 eventi + polling su readyState.
+ * Strategia display: video NASCOSTO + canvas VISIBILE
+ *  - Il video con srcObject non è mai visibile all'utente
+ *  - Un loop copia i frame video sul canvas ogni 50ms
+ *  - Il canvas è ciò che l'utente vede
+ *  - La decodifica avviene sullo stesso canvas
  *
- * Lookup cascade: OFF world/IT → Open Beauty → Open Pet Food →
- *                 Open Products → UPC Item DB → Community DB
+ * Questo bypassa completamente il bug di iOS PWA dove il <video> rimane nero.
+ *
+ * Lookup cascade: OFF world/IT → Beauty → PetFood → Products → UPC → Community
  */
 
 // ── Stream caching ────────────────────────────────────────────────────────────
 
 let cachedStream: MediaStream | null = null
+// Video element nascosto riutilizzato tra sessioni
+let hiddenVideo: HTMLVideoElement | null = null
 
 async function getStream(): Promise<MediaStream> {
   if (cachedStream?.active) return cachedStream
 
-  // Cascata tentativi: exact → ideal → generic → any
   const attempts: MediaStreamConstraints['video'][] = [
     { facingMode: { exact: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
     { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -36,52 +41,94 @@ async function getStream(): Promise<MediaStream> {
 export function releaseStream() {
   cachedStream?.getTracks().forEach(t => t.stop())
   cachedStream = null
+  if (hiddenVideo) {
+    hiddenVideo.srcObject = null
+    hiddenVideo.remove()
+    hiddenVideo = null
+  }
 }
 
-// ── Aspetta che il video sia pronto (iOS PWA safe) ────────────────────────────
+// ── Video nascosto (singleton) ────────────────────────────────────────────────
 
-function waitForVideoReady(videoEl: HTMLVideoElement, timeoutMs = 12000): Promise<void> {
-  return new Promise((resolve, reject) => {
-    // Già pronto?
-    if (videoEl.readyState >= 2 && videoEl.videoWidth > 0) { resolve(); return }
+function getHiddenVideo(): HTMLVideoElement {
+  if (!hiddenVideo) {
+    hiddenVideo = document.createElement('video')
+    // Tutti gli attributi necessari per iOS
+    hiddenVideo.muted       = true
+    hiddenVideo.playsInline = true
+    hiddenVideo.setAttribute('playsinline', '')
+    hiddenVideo.setAttribute('webkit-playsinline', '')
+    hiddenVideo.setAttribute('autoplay', '')
+    hiddenVideo.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;'
+    document.body.appendChild(hiddenVideo)
+  }
+  return hiddenVideo
+}
 
-    const timer = setTimeout(() => {
+// ── Avvio stream sul video nascosto ───────────────────────────────────────────
+
+async function startHiddenVideo(stream: MediaStream): Promise<HTMLVideoElement> {
+  const video = getHiddenVideo()
+  video.srcObject = stream
+
+  // Tenta play subito
+  try { await video.play() } catch { /* riprova dopo gli eventi */ }
+
+  // Aspetta che il video abbia dimensioni (polling + eventi)
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
       cleanup()
       reject(new Error(
-        'Timeout fotocamera. Su iPhone: Impostazioni → Safari → ' +
-        'Fotocamera → Consenti, poi ricarica la pagina.'
+        'Fotocamera non disponibile. Su iPhone: Impostazioni → ' +
+        'Privacy e Sicurezza → Fotocamera → Safari (o StockSafe) → Consenti'
       ))
-    }, timeoutMs)
+    }, 12000)
 
-    const onReady = () => {
-      // Su iOS readyState può essere 1 (HAVE_METADATA) ma videoWidth è già > 0
-      if (videoEl.videoWidth > 0 || videoEl.readyState >= 2) {
+    const check = () => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
         cleanup(); resolve()
       }
     }
 
-    // Polling di sicurezza — iOS a volte non emette nessun evento
-    const poll = setInterval(() => {
-      if (videoEl.readyState >= 1 && videoEl.videoWidth > 0) {
-        cleanup(); resolve()
+    const poll = setInterval(check, 80)
+
+    const onEvent = () => {
+      if (video.paused) {
+        video.play().catch(() => {})
       }
-    }, 100)
+      check()
+    }
+
+    video.addEventListener('loadedmetadata', onEvent)
+    video.addEventListener('loadeddata',     onEvent)
+    video.addEventListener('canplay',        onEvent)
+    video.addEventListener('playing',        onEvent)
+    video.addEventListener('error', () => {
+      cleanup()
+      reject(new Error('Errore stream video'))
+    }, { once: true })
 
     const cleanup = () => {
-      clearTimeout(timer)
+      clearTimeout(timeout)
       clearInterval(poll)
-      videoEl.removeEventListener('loadedmetadata', onReady)
-      videoEl.removeEventListener('loadeddata',     onReady)
-      videoEl.removeEventListener('canplay',        onReady)
-      videoEl.removeEventListener('canplaythrough', onReady)
+      video.removeEventListener('loadedmetadata', onEvent)
+      video.removeEventListener('loadeddata',     onEvent)
+      video.removeEventListener('canplay',        onEvent)
+      video.removeEventListener('playing',        onEvent)
     }
 
-    videoEl.addEventListener('loadedmetadata', onReady)
-    videoEl.addEventListener('loadeddata',     onReady)
-    videoEl.addEventListener('canplay',        onReady)
-    videoEl.addEventListener('canplaythrough', onReady)
-    videoEl.addEventListener('error', () => { cleanup(); reject(new Error('Errore stream video')) }, { once: true })
+    // Se già pronto
+    check()
   })
+
+  // Assicura che sia in play
+  if (video.paused) {
+    try { await video.play() } catch (e) {
+      throw new Error('Impossibile avviare la fotocamera. Controlla i permessi.')
+    }
+  }
+
+  return video
 }
 
 // ── BarcodeDetector nativo ────────────────────────────────────────────────────
@@ -102,7 +149,7 @@ async function getNativeDetector(): Promise<NativeDetector | null> {
   } catch { return null }
 }
 
-// ── ZXing canvas polling ──────────────────────────────────────────────────────
+// ── ZXing decode su canvas ────────────────────────────────────────────────────
 
 type ZXingReader = { decode(bmp: unknown): { getText(): string } }
 
@@ -113,14 +160,10 @@ async function makeZxingReader(): Promise<ZXingReader | null> {
   } catch { return null }
 }
 
-async function decodeFrame(
-  canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D,
-  videoEl: HTMLVideoElement, reader: ZXingReader
+async function decodeCanvas(
+  canvas: HTMLCanvasElement,
+  reader: ZXingReader
 ): Promise<string | null> {
-  if (videoEl.readyState < 1 || videoEl.videoWidth === 0) return null
-  canvas.width  = videoEl.videoWidth
-  canvas.height = videoEl.videoHeight
-  ctx.drawImage(videoEl, 0, 0)
   try {
     const zx     = await import('@zxing/library')
     const source = new zx.HTMLCanvasElementLuminanceSource(canvas)
@@ -130,73 +173,61 @@ async function decodeFrame(
 }
 
 // ── Scanner principale ────────────────────────────────────────────────────────
+// canvasEl: il canvas VISIBILE passato da AddItemPage
 
 export async function startScanner(
-  videoEl: HTMLVideoElement,
+  canvasEl: HTMLCanvasElement,
   onDetect: (code: string) => void,
   onError?: (err: Error) => void
 ): Promise<() => void> {
   let stopped = false
   let rafId: number | null = null
+  const ctx = canvasEl.getContext('2d')!
 
   try {
     const stream = await getStream()
-
-    // Attributi critici iOS — impostati prima di srcObject
-    videoEl.muted       = true
-    videoEl.playsInline = true
-    videoEl.setAttribute('playsinline', '')   // attributo HTML esplicito per Safari
-    videoEl.setAttribute('webkit-playsinline', '') // vecchio Safari
-    videoEl.srcObject   = stream
-
-    // Tenta play immediato (iOS richiede gesto utente, ma qui siamo in un click)
-    try { await videoEl.play() } catch { /* se fallisce aspettiamo gli eventi */ }
-
-    // Aspetta che il video abbia dimensioni reali
-    await waitForVideoReady(videoEl)
-
-    // Se play non era partito, ritenta
-    if (videoEl.paused) {
-      try { await videoEl.play() } catch (e) {
-        throw new Error('Impossibile avviare il video. Controlla i permessi fotocamera.')
-      }
-    }
+    const video  = await startHiddenVideo(stream)
 
     const nativeDetector = await getNativeDetector()
+    const zxingReader    = nativeDetector ? null : await makeZxingReader()
 
-    if (nativeDetector) {
-      const tick = async () => {
-        if (stopped) return
-        try {
-          if (videoEl.readyState >= 1 && videoEl.videoWidth > 0) {
-            const hits = await nativeDetector.detect(videoEl)
-            if (hits[0]?.rawValue) { onDetect(hits[0].rawValue); return }
-          }
-        } catch { /* frame non decodificabile */ }
-        rafId = requestAnimationFrame(tick)
-      }
-      tick()
-    } else {
-      const zxingReader = await makeZxingReader()
-      if (!zxingReader) {
-        onError?.(new Error('Libreria barcode non disponibile.'))
-        return () => { stopped = true }
-      }
-      const canvas = document.createElement('canvas')
-      const ctx    = canvas.getContext('2d')!
-      let lastTime = 0
-      const INTERVAL = 150
-      const tick = (now: number) => {
-        if (stopped) return
-        rafId = requestAnimationFrame(tick)
-        if (now - lastTime < INTERVAL) return
-        lastTime = now
-        decodeFrame(canvas, ctx, videoEl, zxingReader).then(code => {
-          if (code && !stopped) onDetect(code)
-        })
-      }
-      rafId = requestAnimationFrame(tick)
+    if (!nativeDetector && !zxingReader) {
+      onError?.(new Error('Libreria barcode non disponibile.'))
+      return () => { stopped = true }
     }
+
+    let lastDecodeTime = 0
+    const DECODE_INTERVAL = 150  // decodifica ogni 150ms
+
+    const tick = async (now: number) => {
+      if (stopped) return
+      rafId = requestAnimationFrame(tick)
+
+      // Copia frame dal video nascosto al canvas visibile
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        canvasEl.width  = video.videoWidth
+        canvasEl.height = video.videoHeight
+        ctx.drawImage(video, 0, 0)
+      }
+
+      // Decodifica a intervalli per non sovraccaricare
+      if (now - lastDecodeTime < DECODE_INTERVAL) return
+      lastDecodeTime = now
+
+      if (canvasEl.width === 0) return
+
+      try {
+        if (nativeDetector) {
+          const hits = await nativeDetector.detect(canvasEl)
+          if (hits[0]?.rawValue && !stopped) { onDetect(hits[0].rawValue); return }
+        } else if (zxingReader) {
+          const code = await decodeCanvas(canvasEl, zxingReader)
+          if (code && !stopped) { onDetect(code); return }
+        }
+      } catch { /* frame non decodificabile */ }
+    }
+
+    rafId = requestAnimationFrame(tick)
 
   } catch (e) {
     onError?.(e as Error)
@@ -205,14 +236,13 @@ export async function startScanner(
   return () => {
     stopped = true
     if (rafId !== null) cancelAnimationFrame(rafId)
-    videoEl.pause()
-    videoEl.srcObject = null
+    // Non rilasciamo lo stream — solo fermiamo il loop
   }
 }
 
 export function stopScanner() { releaseStream() }
 
-// ── ProductInfo ───────────────────────────────────────────────────────────────
+// ── ProductInfo + lookup ──────────────────────────────────────────────────────
 
 export interface ProductInfo {
   name:        string
@@ -246,12 +276,14 @@ const empty = (barcode: string): ProductInfo => ({
   weightValue: null, weightUnit: null,
 })
 
-type OFFHost = 'world.openfoodfacts' | 'world.openbeautyfacts' | 'world.openpetfoodfacts' | 'world.openproductsfacts'
+type OFFHost = 'world.openfoodfacts'|'world.openbeautyfacts'|'world.openpetfoodfacts'|'world.openproductsfacts'
 
 async function fetchOpenFacts(barcode: string, host: OFFHost, sourceName: string): Promise<ProductInfo | null> {
   try {
-    const url = `https://${host}.org/api/v2/product/${encodeURIComponent(barcode)}?fields=product_name,product_name_it,brands,categories_tags,image_front_small_url,quantity,product_quantity`
-    const res  = await fetch(url, { signal: AbortSignal.timeout(7000) })
+    const res  = await fetch(
+      `https://${host}.org/api/v2/product/${encodeURIComponent(barcode)}?fields=product_name,product_name_it,brands,categories_tags,image_front_small_url,quantity,product_quantity`,
+      { signal: AbortSignal.timeout(7000) }
+    )
     if (!res.ok) return null
     const data = await res.json()
     if (data.status !== 1 || !data.product) return null
@@ -272,7 +304,7 @@ async function fetchOpenFacts(barcode: string, host: OFFHost, sourceName: string
 
 async function fetchUpcItemDb(barcode: string): Promise<ProductInfo | null> {
   try {
-    const res = await fetch(
+    const res  = await fetch(
       `https://api.upcitemdb.com/prod/trial/lookup?upc=${encodeURIComponent(barcode)}`,
       { signal: AbortSignal.timeout(7000) }
     )
@@ -296,17 +328,17 @@ export async function lookupBarcode(barcode: string): Promise<ProductInfo> {
     fetchOpenFacts(barcode, 'world.openpetfoodfacts', 'opff'),
     fetchOpenFacts(barcode, 'world.openproductsfacts','opf'),
   ])
-  const publicResult = offWorld ?? obf ?? opff ?? opf
-  if (publicResult) return publicResult
+  const pub = offWorld ?? obf ?? opff ?? opf
+  if (pub) return pub
 
   const upc = await fetchUpcItemDb(barcode)
   if (upc) return upc
 
   try {
     const { communityLookup } = await import('./communityDb')
-    const community = await communityLookup(barcode)
-    if (community) return { ...community, source: 'community' }
-  } catch { /* community db non disponibile */ }
+    const c = await communityLookup(barcode)
+    if (c) return { ...c, source: 'community' }
+  } catch { /* non disponibile */ }
 
   return empty(barcode)
 }
