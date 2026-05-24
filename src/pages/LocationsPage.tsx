@@ -3,9 +3,13 @@ import { useAuthStore }      from '../stores/authStore'
 import { useLocationStore }  from '../stores/locationStore'
 import { useInventoryStore } from '../stores/inventoryStore'
 import { buildChecklist, exportXlsx, exportDocx } from '../lib/checklist'
+import { ALL_ICONS } from './CategoriesPage'
 
-const ICONS  = ['🏠','🎒','🚗','🏕️','🏢','🏪','🏫','🏥','⛺','🛖','🚢','✈️','🏔️','🌊','🔒','📦','🧰','🗄️','💼','🎁']
-const COLORS = ['#F59E0B','#EF4444','#10B981','#3B82F6','#8B5CF6','#EC4899','#06B6D4','#84CC16','#F97316','#6366F1']
+const COLORS = [
+  '#F59E0B','#EF4444','#10B981','#3B82F6','#8B5CF6',
+  '#EC4899','#06B6D4','#84CC16','#F97316','#6366F1',
+  '#14B8A6','#F43F5E','#A78BFA','#34D399','#60A5FA',
+]
 
 type ExportFormat = 'xlsx' | 'docx'
 
@@ -117,28 +121,11 @@ export function LocationsPage() {
             </div>
             <div className="field">
               <label>Icona</label>
-              <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
-                {ICONS.map(ic => (
-                  <button key={ic} type="button"
-                    style={{ width:36, height:36, fontSize:'1.2rem', borderRadius:8, cursor:'pointer',
-                      background: ficon===ic ? 'var(--accent-glow)' : 'var(--bg-raised)',
-                      border:`1px solid ${ficon===ic ? 'var(--accent)' : 'var(--border)'}`,
-                      display:'flex', alignItems:'center', justifyContent:'center' }}
-                    onClick={() => setFicon(ic)}>{ic}</button>
-                ))}
-              </div>
+              <LocationIconPicker value={ficon} onChange={setFicon} />
             </div>
             <div className="field">
               <label>Colore</label>
-              <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
-                {COLORS.map(c => (
-                  <button key={c} type="button"
-                    style={{ width:28, height:28, borderRadius:'50%', background:c, cursor:'pointer',
-                      border:`2px solid ${fcolor===c?'#fff':'transparent'}`,
-                      outline:fcolor===c?`2px solid ${c}`:'none', outlineOffset:2, transition:'all 0.15s' }}
-                    onClick={() => setFcolor(c)}/>
-                ))}
-              </div>
+              <LocationColorPicker value={fcolor} onChange={setFcolor} />
             </div>
             {/* Anteprima */}
             <div style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 14px',
@@ -268,6 +255,87 @@ function Stat({ label, value, color }: { label:string; value:string; color:strin
     <div style={{ display:'flex', flexDirection:'column', gap:2 }}>
       <span style={{ fontSize:'0.66rem', color:'var(--text-muted)', textTransform:'uppercase', letterSpacing:'0.06em', fontWeight:700 }}>{label}</span>
       <span style={{ fontSize:'0.88rem', fontWeight:700, color, fontFamily:'var(--font-mono)' }}>{value}</span>
+    </div>
+  )
+}
+
+// ── Picker icona per depositi (usa ALL_ICONS + ricerca) ───────────────────────
+
+function LocationIconPicker({ value, onChange }: { value: string; onChange: (ic: string) => void }) {
+  const [search, setSearch] = useState('')
+  const EMOJI_LABELS: Record<string, string> = {
+    '🏠':'casa home','🎒':'zaino borsa','🚗':'auto macchina','🏕️':'campeggio',
+    '🏢':'ufficio edificio','🏪':'negozio','🏫':'scuola','🏥':'ospedale',
+    '⛺':'tenda campeggio','🛖':'capanna','🚢':'nave barca','✈️':'aereo viaggio',
+    '🏔️':'montagna','🌊':'mare acqua','🔒':'lucchetto sicurezza','📦':'scatola',
+    '🧰':'cassetta attrezzi','🗄️':'armadio schedario','💼':'valigetta ufficio','🎁':'regalo',
+  }
+  const getLabel = (ic: string) => EMOJI_LABELS[ic] ?? ic
+  const filtered = search.trim()
+    ? ALL_ICONS.filter(ic => getLabel(ic).toLowerCase().includes(search.toLowerCase()))
+    : ALL_ICONS
+
+  return (
+    <div>
+      <input
+        type="text" className="input"
+        style={{ marginBottom:8, fontSize:'0.82rem' }}
+        placeholder="Cerca icona (es. casa, auto, ufficio…)"
+        value={search}
+        onChange={e => setSearch(e.target.value)}
+      />
+      <div style={{
+        display:'flex', flexWrap:'wrap', gap:5,
+        maxHeight:160, overflowY:'auto',
+        padding:4, borderRadius:8,
+        background:'var(--bg-base)', border:'1px solid var(--border)',
+      }}>
+        {filtered.map(ic => (
+          <button key={ic} type="button"
+            style={{
+              width:36, height:36, fontSize:'1.2rem', borderRadius:8, cursor:'pointer',
+              background: value===ic ? 'var(--accent-glow)' : 'var(--bg-raised)',
+              border:`1px solid ${value===ic ? 'var(--accent)' : 'var(--border)'}`,
+              display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0,
+            }}
+            onClick={() => onChange(ic)}>{ic}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ── Picker colore per depositi (con colore custom) ────────────────────────────
+
+function LocationColorPicker({ value, onChange }: { value: string; onChange: (c: string) => void }) {
+  return (
+    <div style={{ display:'flex', flexWrap:'wrap', gap:6, alignItems:'center' }}>
+      {COLORS.map(c => (
+        <button key={c} type="button"
+          style={{
+            width:28, height:28, borderRadius:'50%', background:c, cursor:'pointer',
+            border:`2px solid ${value===c?'#fff':'transparent'}`,
+            outline:value===c?`2px solid ${c}`:'none', outlineOffset:2, transition:'all 0.15s',
+          }}
+          onClick={() => onChange(c)}/>
+      ))}
+      <label title="Colore personalizzato" style={{ position:'relative', cursor:'pointer' }}>
+        <div style={{
+          width:28, height:28, borderRadius:'50%',
+          background: COLORS.includes(value) ? 'var(--bg-raised)' : value,
+          border:`2px solid ${!COLORS.includes(value)?'#fff':'var(--border)'}`,
+          outline:!COLORS.includes(value)?`2px solid ${value}`:'none',
+          outlineOffset:2, display:'flex', alignItems:'center', justifyContent:'center',
+          fontSize:'0.75rem', color:'var(--text-muted)',
+        }}>
+          {COLORS.includes(value) ? '🎨' : ''}
+        </div>
+        <input
+          type="color" value={value} onChange={e => onChange(e.target.value)}
+          style={{ position:'absolute', inset:0, opacity:0, width:'100%', height:'100%', cursor:'pointer' }}
+        />
+      </label>
     </div>
   )
 }

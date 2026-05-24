@@ -57,6 +57,7 @@ interface InventoryState {
   moveItems:       (ids: string[], locationId: string | null) => Promise<void>
   deleteItem:      (id: string) => Promise<void>
   addCategory:     (userId: string, name: string, icon?: string, color?: string) => Promise<void>
+  updateCategory:  (id: string, patch: { name?: string; icon?: string; color?: string }) => Promise<void>
   deleteCategory:  (id: string) => Promise<void>
   clearError:      () => void
 }
@@ -201,6 +202,21 @@ export const useInventoryStore = create<InventoryState>()((set, get) => ({
     if (!error && data) {
       const cat: Category = { id: data.id, name: data.name, icon: data.icon, color: data.color, isDefault: false }
       set(s => ({ categories: [...s.categories, cat].sort((a, b) => a.name.localeCompare(b.name)) }))
+    }
+  },
+
+  updateCategory: async (id, patch) => {
+    const { error } = await supabase.from('categories').update({
+      ...(patch.name  !== undefined && { name:  patch.name  }),
+      ...(patch.icon  !== undefined && { icon:  patch.icon  }),
+      ...(patch.color !== undefined && { color: patch.color }),
+    }).eq('id', id)
+    if (!error) {
+      set(s => ({
+        categories: s.categories
+          .map(c => c.id === id ? { ...c, ...patch } : c)
+          .sort((a, b) => a.name.localeCompare(b.name, 'it', { sensitivity: 'base' }))
+      }))
     }
   },
 
