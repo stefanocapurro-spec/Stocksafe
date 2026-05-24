@@ -4,7 +4,6 @@ on:
   schedule:
     # Ogni giorno alle 08:00 UTC (09:00 ora italiana, 10:00 in estate)
     - cron: '0 8 * * *'
-  # Permette di eseguirlo manualmente dalla scheda Actions se necessario
   workflow_dispatch:
 
 jobs:
@@ -23,7 +22,7 @@ jobs:
 
           echo "HTTP status: $STATUS"
 
-          # 200 = ok, 406 = ok (RLS attivo, nessun utente loggato — è corretto)
+          # 200 = ok, 406 = ok (RLS attivo, nessun utente loggato)
           if [ "$STATUS" = "200" ] || [ "$STATUS" = "406" ]; then
             echo "✅ Supabase attivo e raggiungibile."
           else
