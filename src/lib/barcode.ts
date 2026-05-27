@@ -23,14 +23,26 @@ export function isIOS(): boolean {
   )
 }
 
-// ── Stream: esportata per essere chiamata dal componente nel gesto utente ─────
+// ── Stream ────────────────────────────────────────────────────────────────────
+//
+// Su iOS PWA (standalone), cachedStream.active rimane true anche dopo che
+// WebKit ha smontato internamente la pipeline video → stream "zombie" → nero.
+// Fix: su iOS non caching mai; su altri browser caching OK.
 
 let cachedStream: MediaStream | null = null
 
-/** Deve essere chiamata DIRETTAMENTE dall'handler onClick (await in async fn).
- *  Mai dentro setTimeout o callback async non collegata al gesto. */
+function isIOSPWA(): boolean {
+  return isIOS() && (window.navigator as Navigator & { standalone?: boolean }).standalone === true
+}
+
+/** Chiamata DIRETTAMENTE nell'handler onClick — mai dentro setTimeout. */
 export async function getStream(): Promise<MediaStream> {
-  if (cachedStream?.active) return cachedStream
+  // Su iOS PWA: release sempre prima di riacquisire (evita stream zombie)
+  if (isIOSPWA()) {
+    releaseStream()
+  } else if (cachedStream?.active) {
+    return cachedStream
+  }
 
   const attempts: MediaStreamConstraints['video'][] = [
     { facingMode: { exact: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
