@@ -148,11 +148,23 @@ export function LoginPage() {
 }
 
 const AUTH_CSS = `
-.auth-page { min-height:100vh; display:flex; align-items:center; justify-content:center;
-  padding:24px 16px;
-  background: radial-gradient(ellipse 60% 40% at 50% 0%, var(--accent-glow) 0%, transparent 70%), var(--bg-base); }
-.auth-container { width:100%; max-width:420px; display:flex; flex-direction:column; gap:10px; }
-.auth-brand { text-align:center; margin-bottom:10px; }
-.auth-brand h1 { font-size:2rem; }
-.auth-brand p { font-size:0.86rem; }
+.auth-page {
+  min-height: 100svh;
+  min-height: 100vh;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px 32px;
+  background: radial-gradient(ellipse 70% 35% at 50% 0%, var(--accent-glow) 0%, transparent 65%), var(--bg-base);
+}
+.auth-container {
+  width: 100%;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.auth-brand { text-align: center; margin-bottom: 6px; }
+.auth-brand h1 { font-size: 2rem; }
+.auth-brand p  { font-size: 0.86rem; }
 `
